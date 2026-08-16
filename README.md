@@ -1,127 +1,377 @@
-# KLA Hackathon — AI-Based Restoration of Degraded Images for Semiconductor Inspection
+# KLA Hackathon 2026 — AI-Based Restoration of Degraded Images for Semiconductor Inspection
 
 ## Overview
 
-This project implements an AI-based image restoration pipeline for degraded semiconductor inspection images.
+This project implements a compact AI-based image restoration pipeline for degraded semiconductor inspection images, developed for **SEMICON India Hackathon 2026 — KLA Problem Statement 1**.
 
-The model takes a degraded/noisy low-resolution image as input and generates a cleaner, sharper and higher-resolution restored image. The restoration is learned using paired degraded images and corresponding high-quality ground-truth images.
+The model takes a degraded, noisy and low-resolution grayscale inspection image and produces a cleaner, sharper and higher-resolution restoration. The network jointly performs **degradation removal and 2× spatial upscaling** rather than using separate sequential models.
 
 The overall pipeline is:
 
 ```text
 Degraded / Noisy Low-Resolution Image
                 ↓
-       AI Restoration Model
+       Compact RRDB Restoration Network
                 ↓
-     Restored High-Resolution Image
+       2× Super-Resolution Output
                 ↓
-       Comparison with Ground Truth
+       Restored High-Resolution Image
+                ↓
+      PSNR / SSIM / LPIPS Evaluation
 ```
 
-The goal is to recover useful spatial details while reducing degradation in semiconductor inspection images.
+The objective is to recover useful spatial details while suppressing degradation, while keeping the model compact enough for practical inference.
+
+The approach is designed around the three degradation requirements of the KLA problem:
+
+* Speckle noise
+* Gaussian noise
+* Spatial-resolution reduction / 2× super-resolution
+
+The model is also designed with inference efficiency and generalization in mind, since KLA evaluates both restoration quality and inference performance.
+
+---
+
+## Problem Context
+
+Semiconductor inspection relies on high-quality microscopic images to identify small structures and defects. Noise and loss of spatial resolution can obscure fine details and reduce the reliability of downstream inspection.
+
+The KLA problem provides paired degraded and ground-truth images and requires a model that learns to reconstruct the high-resolution target from the degraded input.
+
+A key requirement is that the restoration model should handle multiple degradation types **simultaneously**, rather than assuming that only one degradation is present.
 
 ---
 
 ## Dataset
 
-The dataset consists of paired degraded and high-quality images.
+The development dataset consists of paired degraded and high-quality grayscale images.
 
-- `NoisyLR` — degraded/low-resolution input images
-- `GT 0` and `GT 1` — corresponding high-quality ground-truth images
+* `NoisyLR` — degraded / low-resolution input images
+* `GT_0` and `GT_1` — corresponding ground-truth images
 
-A total of **3200 matched image pairs** were used:
+A total of **3200 matched samples** were used:
 
-- **2880 pairs** for training
-- **320 pairs** for validation
+* **2880 samples** for training
+* **320 samples** for validation
 
-The input images are grayscale `128×128` images, while the corresponding ground-truth images provide the higher-resolution target used for supervised training.
-
-During training, the model learns to transform the degraded input into an output that is as close as possible to its corresponding ground-truth image.
-
----
-
-## Model
-
-We use a compact deep-learning image restoration network designed to run efficiently on limited GPU memory.
-
-The final model configuration is:
-
-- **Input channels:** 1 (grayscale)
-- **Output channels:** 1
-- **Scale factor:** 2×
-- **Model size:** Small
-- **Parameters:** approximately 2.55 million
-- **Input size:** 128×128
-- **Output size:** 256×256
-
-The model learns the following mapping:
+The primary development configuration uses:
 
 ```text
-Degraded 128×128 Image
-          ↓
-   Restoration Network
-          ↓
-Restored 256×256 Image
+Input:        128 × 128 grayscale
+Target:       256 × 256 grayscale
+Channels:     1
+Scale factor: 2×
 ```
 
-The network performs image restoration, denoising and spatial upscaling in a single pipeline.
+The model learns the mapping:
+
+```text
+NoisyLR 128×128
+      ↓
+Restoration Network
+      ↓
+Restored 256×256
+      ↓
+Ground Truth 256×256
+```
+
+The official KLA test set is designed to include both in-distribution and out-of-distribution samples. The official test set was not used for the validation metrics reported below.
 
 ---
 
-## Training
+## Model Architecture
 
-The model is trained using supervised learning on the paired degraded and ground-truth images.
+The proposed model is a **compact Residual-in-Residual Dense Block (RRDB) CNN**, inspired by the RRDB architecture used in ESRGAN/Real-ESRGAN and adapted for the computational constraints of this task.
+
+### Configuration
+
+| Parameter         | Configuration |
+| ----------------- | ------------- |
+| Input channels    | 1             |
+| Output channels   | 1             |
+| Input resolution  | 128×128       |
+| Output resolution | 256×256       |
+| Scale factor      | 2×            |
+| RRDB blocks       | 6             |
+| Feature channels  | 48            |
+| Growth channels   | 24            |
+| Parameters        | ~2.55M        |
+
+The architecture uses:
+
+* RRDB residual-dense blocks
+* Bicubic global residual skip
+* PixelShuffle ×2 upsampling
+* ICNR initialization
+* No final sigmoid activation
+* Output clamping during evaluation
+
+### Residual Reconstruction
+
+Instead of learning the complete high-resolution image from scratch, the network uses a bicubic-upsampled image as a global residual baseline:
+
+```text
+Input
+  │
+  ├──────────────→ Bicubic ×2 ───────────────┐
+  │                                          │
+  ↓                                          ↓
+RRDB Restoration Body → PixelShuffle → Learned Residual
+                                             │
+                                             ↓
+                              Bicubic Base + Residual
+                                             │
+                                             ↓
+                                    Restored Output
+```
+
+This allows the network to focus primarily on learning the missing correction and fine details.
+
+The implementation also uses ICNR initialization for the pre-PixelShuffle convolution to reduce checkerboard artifacts during sub-pixel upsampling.
+
+---
+
+## Why This Architecture
+
+The architecture was selected primarily because it provides a strong quality-to-complexity trade-off.
+
+### Compact model
+
+The network contains approximately **2.55 million parameters**, allowing training on a laptop RTX 3050 with 6 GB VRAM.
+
+### Joint restoration
+
+Denoising and super-resolution are handled in the same network rather than using a sequential denoiser followed by a super-resolution model. This reduces the possibility of error propagation between separate restoration stages.
+
+### Residual learning
+
+The bicubic global skip provides a strong low-frequency reconstruction while the network focuses on recovering the residual high-frequency information.
+
+### Efficient upsampling
+
+PixelShuffle provides learned 2× upsampling while keeping most feature extraction at the lower spatial resolution.
+
+---
+
+## Training Strategy
+
+The model is trained using supervised learning on paired degraded and ground-truth images.
 
 For each training sample:
 
-1. The degraded image is given to the model.
-2. The model generates a restored image.
-3. The restored image is compared with the ground-truth image.
-4. The losses are calculated.
-5. Backpropagation updates the model weights.
-6. The model is evaluated on the validation set.
-7. The best-performing checkpoint based on validation SSIM is saved.
+1. Load the degraded input.
+2. Generate the restored high-resolution image.
+3. Compare the output against the corresponding ground truth.
+4. Calculate the combined restoration loss.
+5. Backpropagate the loss.
+6. Update the model parameters.
+7. Evaluate the model on the validation set.
+8. Save the best-performing checkpoint according to validation performance.
 
-### Loss Functions
+### Degradation-Aware Training
 
-The training objective combines multiple losses:
+The training pipeline supports synthetic degradation augmentation to improve robustness to different image degradation conditions, including Gaussian and speckle noise.
 
-- **Pixel reconstruction loss** — encourages the generated pixels to remain close to the ground truth.
-- **SSIM loss** — helps preserve structural information, edges and image details.
-- **LPIPS loss** — encourages perceptually meaningful image reconstruction.
+The final fine-tuning stage used the paired KLA data directly with additional synthetic noise augmentation disabled.
 
-For the final fine-tuning run, we used:
+This separates the degradation-robustness training stage from the final paired-data fine-tuning stage.
 
-- **Learning rate:** `2e-5`
-- **SSIM weight:** `0.4`
-- **LPIPS weight:** `0.08`
-- **Additional synthetic noise augmentation:** disabled
-- **Mixed precision:** BF16
-- **Gradient clipping:** `1.0`
+---
+
+## Loss Functions
+
+The restoration objective combines pixel-level and perceptual/structural objectives.
+
+### Charbonnier / Robust Reconstruction Loss
+
+A robust pixel reconstruction objective is used to reduce sensitivity to outliers while encouraging accurate image reconstruction.
+
+### SSIM Loss
+
+SSIM-based optimization encourages preservation of:
+
+* Structural information
+* Edges
+* Local contrast
+* Fine image structures
+
+### LPIPS Loss
+
+LPIPS provides a perceptual similarity objective that complements pixel-level reconstruction metrics.
+
+The final fine-tuning configuration used:
+
+```text
+Learning rate:          2e-5
+SSIM weight:            0.4
+LPIPS weight:           0.08
+Mixed precision:        BF16
+Gradient clipping:     1.0
+Synthetic noise during
+final fine-tuning:      Disabled
+```
 
 ---
 
 ## Validation Results
 
-The model was evaluated on the held-out validation set using three image-quality metrics:
+The model was evaluated on the held-out validation set using the same three image-quality metrics highlighted for the KLA restoration task.
 
-- **PSNR** — measures pixel-level reconstruction quality. Higher is better.
-- **SSIM** — measures structural similarity between the restored image and ground truth. Higher is better.
-- **LPIPS** — measures perceptual difference between the images. Lower is better.
+* **PSNR** — pixel-level reconstruction quality; higher is better.
+* **SSIM** — structural similarity; higher is better.
+* **LPIPS** — perceptual distance; lower is better.
 
-The best validation result obtained was:
+### Best Validation Result
 
-| Metric | Best Result |
-|---|---:|
-| SSIM | **0.7741** |
-| PSNR | **28.17 dB** |
-| LPIPS | **~0.19** |
+| Metric    |       Result |
+| --------- | -----------: |
+| **PSNR**  | **28.67 dB** |
+| **SSIM**  |   **0.8041** |
+| **LPIPS** |    **~0.16** |
 
-The trained model weights are provided as:
+These are the results reported for the submitted solution.
+
+> **Checkpoint consistency:** `checkpoints/best_model.pt` should be the exact checkpoint corresponding to the metrics above.
+
+The official KLA test set is separate from this validation set and includes out-of-distribution samples. Therefore, no OOD test score is claimed here unless it has been independently measured on the official test data.
+
+---
+
+## Visual Restoration
+
+The restoration process is:
 
 ```text
-checkpoints/best_model.pt
+Degraded Input
+      ↓
+Noise / Resolution Degradation
+      ↓
+Compact RRDB Restoration Network
+      ↓
+Restored Output
+      ↓
+Comparison with Ground Truth
 ```
+
+The model is intended to remove degradation while preserving fine spatial structures rather than simply smoothing the image.
+
+---
+
+## Inference
+
+The repository contains a standalone evaluation script:
+
+```text
+evaluate_submission.py
+```
+
+The script accepts:
+
+* Input image directory
+* Output directory
+* Model checkpoint
+
+### Run inference
+
+```bash
+python evaluate_submission.py \
+    --input_dir PATH_TO_TEST_IMAGES \
+    --output_dir restored_test_outputs \
+    --checkpoint checkpoints/best_model.pt
+```
+
+Example:
+
+```bash
+python evaluate_submission.py \
+    --input_dir test_images \
+    --output_dir restored_test_outputs \
+    --checkpoint checkpoints/best_model.pt
+```
+
+The script:
+
+1. Loads the trained checkpoint.
+2. Automatically detects the available device.
+3. Reads supported image files and NumPy arrays.
+4. Groups inputs by spatial dimensions.
+5. Performs batched inference.
+6. Generates restored images.
+7. Saves the outputs as PNG files.
+
+The script is designed to operate as a standalone inference pipeline without requiring manual modification.
+
+The default inference configuration includes:
+
+```text
+Batch size:       64
+I/O workers:      8
+PNG compression:  1
+```
+
+---
+
+## Inference Performance
+
+The pipeline was benchmarked locally on an:
+
+```text
+GPU: NVIDIA RTX 3050 Laptop GPU
+VRAM: 6 GB
+Images: 3200
+```
+
+Measured end-to-end performance:
+
+```text
+Processed images:       3200
+Model load time:        0.228 s
+Inference + I/O time:   64.081 s
+Total end-to-end time:  64.309 s
+```
+
+This corresponds to approximately:
+
+```text
+50 images/second
+```
+
+for the measured end-to-end local run.
+
+The reported time includes inference and I/O and should not be interpreted as pure neural-network compute time.
+
+The evaluation script is designed for the KLA benchmarking environment, where the submission will be evaluated on an H100 GPU.
+
+---
+
+## Reproducing Training
+
+Training can be reproduced using the provided `train.py` script.
+
+Example:
+
+```bash
+python train.py \
+    --gt_dirs data/GT_0 data/GT_1 \
+    --lr_dir data/NoisyLR \
+    --epochs 60 \
+    --batch_size 8 \
+    --model_size small \
+    --in_nc 1 \
+    --use_amp
+```
+
+The training pipeline includes:
+
+* Paired dataset loading
+* Data augmentation
+* Restoration model construction
+* Combined loss optimization
+* Mixed-precision training
+* Gradient clipping
+* Validation
+* PSNR / SSIM / LPIPS evaluation
+* Best-model checkpointing
 
 ---
 
@@ -131,7 +381,11 @@ checkpoints/best_model.pt
 KLA-Image-Restoration/
 │
 ├── checkpoints/
-│   └── best_model.pt
+│   ├── best_model.pt
+│   └── .gitkeep
+│
+├── restored_test_outputs/
+│   └── [restored test images]
 │
 ├── dataset.py
 ├── evaluate_submission.py
@@ -139,19 +393,23 @@ KLA-Image-Restoration/
 ├── metrics.py
 ├── model.py
 ├── requirements.txt
-└── train.py
+├── train.py
+└── README.md
 ```
 
 ### File Description
 
-- `model.py` — defines the image restoration neural network
-- `dataset.py` — loads and prepares the degraded and ground-truth image pairs
-- `losses.py` — implements the pixel, SSIM and LPIPS loss functions
-- `metrics.py` — calculates PSNR, SSIM and LPIPS evaluation metrics
-- `train.py` — contains the complete training and validation pipeline
-- `evaluate_submission.py` — standalone inference script for generating restored images
-- `checkpoints/best_model.pt` — contains the trained model weights
-- `requirements.txt` — contains the Python dependencies required to run the project
+| File                        | Purpose                                                  |
+| --------------------------- | -------------------------------------------------------- |
+| `model.py`                  | Defines the compact RRDB restoration network             |
+| `dataset.py`                | Loads and prepares degraded and ground-truth image pairs |
+| `losses.py`                 | Implements the reconstruction, SSIM and LPIPS objectives |
+| `metrics.py`                | Calculates PSNR, SSIM and LPIPS                          |
+| `train.py`                  | Training and validation pipeline                         |
+| `evaluate_submission.py`    | Standalone inference/evaluation script                   |
+| `checkpoints/best_model.pt` | Final submitted model checkpoint                         |
+| `requirements.txt`          | Pinned Python dependencies                               |
+| `restored_test_outputs/`    | Restored outputs generated by the submitted model        |
 
 ---
 
@@ -163,114 +421,146 @@ Create a Python virtual environment:
 python -m venv venv
 ```
 
-Activate it on Windows:
+### Windows
 
 ```bash
 venv\Scripts\activate
 ```
 
-Install the required dependencies:
+### Linux / macOS
+
+```bash
+source venv/bin/activate
+```
+
+Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Verify that PyTorch can detect the GPU:
+Verify the PyTorch installation:
 
 ```bash
-python -c "import torch; print(torch.cuda.is_available())"
+python -c "import torch; print(torch.__version__); print('CUDA available:', torch.cuda.is_available())"
 ```
 
----
-
-## Running Inference
-
-The standalone evaluation script accepts:
-
-- Input image directory
-- Output directory
-- Trained model checkpoint
-
-Run:
-
-```bash
-python evaluate_submission.py --input_dir PATH_TO_TEST_IMAGES --output_dir restored_test_outputs --checkpoint checkpoints/best_model.pt
-```
-
-For example:
-
-```bash
-python evaluate_submission.py --input_dir test_images --output_dir restored_test_outputs --checkpoint checkpoints/best_model.pt
-```
-
-The evaluation script:
-
-1. Loads the trained model.
-2. Reads all supported input images/arrays.
-3. Groups inputs by spatial dimensions.
-4. Runs batched GPU inference.
-5. Generates restored images.
-6. Saves the restored images as PNG files.
-
-The evaluation script is designed to run without manual modification.
-
----
-
-## Inference Performance
-
-The final evaluation pipeline was tested locally on an NVIDIA RTX 3050 Laptop GPU using 3200 input images.
-
-The test produced:
+The pinned environment currently includes:
 
 ```text
-Processed images:       3200
-Model load time:        0.228 s
-Inference + I/O time:   64.081 s
-Total end-to-end time:  64.309 s
+numpy==1.26.4
+Pillow==11.3.0
+torch==2.11.0
+torchvision==0.26.0
+lpips==0.1.4
 ```
-
-The evaluation pipeline is optimized for GPU inference and is designed to run on the KLA H100 benchmarking environment.
 
 ---
 
-## Reproducing Training
+## Submission Artifacts
 
-Training can be reproduced using:
+For the final hackathon submission, the public repository contains the implementation required to reproduce and evaluate the model:
 
-```bash
-python train.py --gt_dirs data/GT_0 data/GT_1 --lr_dir data/NoisyLR --epochs 60 --batch_size 8 --model_size small --in_nc 1 --use_amp
-```
+* `README.md`
+* Standalone `evaluate_submission.py`
+* Training script `train.py`
+* Trained model weights
+* `requirements.txt`
+* Restored test outputs
 
-The training pipeline performs:
-
-- Paired dataset loading
-- Data augmentation
-- Model training
-- Combined loss optimization
-- Validation
-- PSNR/SSIM/LPIPS evaluation
-- Best-model checkpointing
-
----
-
-## Output
-
-For each degraded input image, the inference script produces a corresponding restored PNG image.
-
-The restoration pipeline can be represented as:
+The most important file for evaluation is:
 
 ```text
-Noisy / Low-Resolution Image
-              ↓
-       AI Restoration Model
-              ↓
-Restored / Higher-Resolution Image
+evaluate_submission.py
 ```
 
-The restored images can be evaluated against the available ground-truth images using PSNR, SSIM and LPIPS.
+It is intentionally provided as a standalone Python script so that the evaluation environment can invoke the model without modifying the source code.
+
+Before final submission, the checkpoint, evaluation script and restored-output folder should all correspond to the same submitted model version.
 
 ---
 
-## Team Objective
+## Technical Design Summary
 
-The objective of this implementation is to improve the quality and usability of degraded semiconductor inspection images by reducing degradation, recovering spatial details and producing higher-resolution images suitable for downstream inspection and analysis.
+The main design choices are:
+
+```text
+Compact RRDB
+      +
+Bicubic Global Residual Skip
+      +
+PixelShuffle ×2
+      +
+ICNR Initialization
+      +
+Robust Reconstruction Loss
+      +
+SSIM Loss
+      +
+LPIPS Loss
+      +
+Degradation-Aware Training
+      +
+Batched GPU Inference
+```
+
+The resulting model provides a compact restoration pipeline with approximately **2.55M parameters**, while jointly addressing image degradation and 2× spatial-resolution recovery.
+
+---
+
+## Generalization
+
+The official KLA evaluation includes both in-distribution and out-of-distribution images.
+
+The development pipeline therefore avoids treating the validation set as the official test set. The model is trained with degradation-aware strategies intended to improve robustness to variations in noise and image appearance.
+
+No numerical OOD performance is claimed in this README because the official KLA test set is separate from the development validation set.
+
+---
+
+## Limitations
+
+The reported metrics are validation results and should not be interpreted as official KLA test-set scores.
+
+The current local inference benchmark combines neural-network inference and file I/O:
+
+```text
+Inference + I/O = 64.081 s for 3200 images
+```
+
+Therefore, the reported 64.309 s end-to-end time is not a pure model-compute benchmark.
+
+Final performance on the official KLA test set, particularly on out-of-distribution samples, will depend on the unseen test distribution and the official H100 evaluation environment.
+
+---
+
+## Research & Technical References
+
+The implementation is based on established image-restoration and image-quality techniques, including:
+
+* Wang et al. — **ESRGAN: Enhanced Super-Resolution Generative Adversarial Networks** (2018) — RRDB architecture
+* Lim et al. — **Enhanced Deep Residual Networks for Single Image Super-Resolution (EDSR)** (2017) — residual/global skip design
+* Aitken et al. — **Checkerboard artifact free sub-pixel convolution** (2017) — ICNR initialization
+* Wang et al. — **Image Quality Assessment: From Error Visibility to Structural Similarity** (2004) — SSIM
+* Zhang et al. — **The Unreasonable Effectiveness of Deep Features as a Perceptual Metric** (2018) — LPIPS
+* Charbonnier et al. — robust Charbonnier/pseudo-Huber loss formulation
+
+---
+
+## Demo
+
+A working demonstration video of the training/inference workflow is provided with the hackathon submission.
+
+---
+
+## Team
+
+**Team DrishtiSilicon**
+
+Problem Statement:
+
+**AI-Based Restoration of Degraded Images for Semiconductor Inspection — KLA PS01**
+
+Repository:
+
+**KLA-Image-Restoration**
