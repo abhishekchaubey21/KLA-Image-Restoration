@@ -1,0 +1,10 @@
+__pycache__/
+clean_test_env/
+data/
+comparison_outputs/
+restored_demo_outputs/
+submission/
+*.pyc
+
+checkpoints/last_checkpoint.pt
+checkpoints/finetune_B/

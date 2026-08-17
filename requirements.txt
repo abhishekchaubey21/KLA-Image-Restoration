@@ -1,0 +1,17 @@
+# Install PyTorch matching your CUDA version FIRST, e.g. for a laptop
+# RTX 3050 with recent drivers (CUDA 12.x):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# Then install the rest:
+#   pip install -r requirements.txt
+#
+# After training, replace this file's contents with the real
+# `pip freeze` output from your environment before submitting —
+# the hackathon requires the exact frozen environment, not this
+# hand-written list.
+
+torch>=2.1.0
+torchvision>=0.16.0
+numpy>=1.24.0
+Pillow>=10.0.0
+lpips>=0.1.4
+tqdm>=4.66.0
