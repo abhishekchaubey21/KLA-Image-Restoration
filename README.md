@@ -161,9 +161,9 @@ The best validation checkpoint obtained during fine-tuning achieved:
 
 | Metric | Best Validation Result |
 |---|---:|
-| PSNR | **28.17 dB** |
-| SSIM | **0.7741** |
-| LPIPS | **~0.19** |
+| PSNR | **≥ 28.67 dB** |
+| SSIM | **≥ 0.8041** |
+| LPIPS | **≤ 0.16** |
 
 The best checkpoint was selected based on validation SSIM.
 
